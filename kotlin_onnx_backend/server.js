@@ -206,8 +206,9 @@ app.post('/tracking', async (req, res) => {
                 status: "skipped" 
             });
         }
-        
-        console.log("Received tracking data:");
+        console.log(" ");
+        console.log("-----------------------------");
+        console.log("RECEIVED TRACKING DATA:");
         console.log("  Session ID: " + sessionId);
         console.log("  Device ID: " + deviceId);
         console.log("  Timestamp: " + timestamp);
@@ -263,12 +264,13 @@ app.post('/upload-image', async (req, res) => {
             jsonData.position_y || jsonData.exit_position_y
         );
         
+        console.log("*****************************");
         console.log("Received image upload with data:");
         console.log("  Session ID: " + sessionId);
         console.log("  Object Type: " + objectType);
         console.log("  Timestamp: " + timestamp);
         console.log("  Location: " + location);
-        console.log("-----------------------------");
+        console.log("*****************************");
         
         // Choose collection based on object type
         let Model;
@@ -322,14 +324,16 @@ app.post('/bus-image', async (req, res) => {
         // Create a unique key for this bus image to detect duplicates
         const imageKey = `busimg-${sessionId}-${deviceId}-${timestamp.substring(0, 16)}`;
         
-        console.log("Received bus image data:");
+        console.log(" ");
+        console.log("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
+        console.log("Received BUS IMAGE DATA:");
         console.log("  Session ID: " + sessionId);
         console.log("  Device ID: " + deviceId);
         console.log("  Timestamp: " + timestamp);
         console.log("  Location: " + location);
         console.log("  Event Type: " + eventType);
         console.log("  Image data length: " + (image_data ? image_data.length : 0));
-        console.log("-----------------------------");
+        console.log("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
         
         if (!image_data) {
             return res.status(400).json({ error: "No image data provided" });
