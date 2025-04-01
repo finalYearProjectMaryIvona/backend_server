@@ -24,7 +24,6 @@ app.get("/", (req, res) => {
 const logSchema = new mongoose.Schema({
     sessionId: String,
     timestamp: String,
-    location: String,
     objectType: String,
     direction: String,
     // GPS
@@ -41,7 +40,6 @@ const busImageSchema = new mongoose.Schema({
     sessionId: String,
     timestamp: String,
     imageData: String,    // Base64 encoded image data
-    location: String,
     objectType: { type: String, default: "bus" },
     deviceId: String,
     eventType: { type: String, default: "unknown" },
@@ -175,7 +173,6 @@ app.post('/logs', async (req, res) => {
         console.log("  Session ID: " + sessionId);
         console.log("  Device ID: " + deviceId);
         console.log("  Timestamp: " + timestamp);
-        console.log("  Location: " + location);
         console.log("  Object Type: " + objectType);
         console.log("  Direction: " + direction);
         console.log("-----------------------------");
@@ -258,7 +255,6 @@ app.post('/tracking', async (req, res) => {
         console.log("  Session ID: " + sessionId);
         console.log("  Device ID: " + deviceId);
         console.log("  Timestamp: " + timestamp);
-        console.log("  Location: " + location);
         console.log("  Object Type: " + objectType);
         console.log("  Direction: " + direction);
         console.log("  GPS: " + gpsLocation);
@@ -404,7 +400,6 @@ app.post('/bus-image', async (req, res) => {
         console.log("  Session ID: " + sessionId);
         console.log("  Device ID: " + deviceId);
         console.log("  Timestamp: " + timestamp);
-        console.log("  Location: " + location);
         console.log("  Event Type: " + eventType);
         console.log("  GPS: " + gpsLocation);
         console.log("  User ID: " + userId);
@@ -460,7 +455,6 @@ app.post('/bus-image', async (req, res) => {
             const newBusTracking = new Bus({
                 sessionId: sessionId,
                 timestamp: timestamp,
-                location: location,
                 objectType: "bus",
                 direction: eventType === "exit" ? "outbound" : "inbound", // Set a direction based on event type
                 // Add GPS data
@@ -597,9 +591,35 @@ async function cleanupIncompleteEntries() {
         console.error("Error cleaning up incomplete entries:", err);
     }
 }
+// Remove the location field from existing records
+async function removeLocationField() {
+    try {
+        console.log("Starting removal of location field from existing records...");
+        
+        const busResult = await Bus.updateMany({}, { $unset: { location: "" } });
+        console.log(`Updated ${busResult.modifiedCount} bus entries`);
+        
+        const vehicleResult = await Vehicle.updateMany({}, { $unset: { location: "" } });
+        console.log(`Updated ${vehicleResult.modifiedCount} vehicle entries`);
+        
+        const otherResult = await Other.updateMany({}, { $unset: { location: "" } });
+        console.log(`Updated ${otherResult.modifiedCount} other entries`);
+        
+        // For bus images, we might still want the location for image context
+        //but you can uncomment this if you want to remove it there too
+        const busImageResult = await BusImage.updateMany({}, { $unset: { location: "" } });
+        console.log(`Updated ${busImageResult.modifiedCount} bus image entries`);
+        
+        console.log("Location field removal complete.");
+    } catch (err) {
+        console.error("Error removing location field:", err);
+    }
+}
 
 // Clean existing data
 cleanupIncompleteEntries();
+
+removeLocationField();
 
 // Start the Server
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
