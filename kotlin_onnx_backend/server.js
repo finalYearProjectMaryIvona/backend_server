@@ -100,27 +100,40 @@ function isRecentlyProcessed(key) {
 
 // Helper function to format timestamp consistently
 function formatTimestamp(timestamp) {
-    if (!timestamp) return new Date().toISOString();
-    
-    // If timestamp is a number (Unix timestamp in milliseconds), convert it
-    if (!isNaN(timestamp)) {
-        return new Date(parseInt(timestamp)).toISOString().slice(0, 19).replace('T', ' ');
-    }
-    
-    // If timestamp already has 'T', it's likely an ISO format
-    if (typeof timestamp === 'string' && timestamp.includes('T')) {
-        return timestamp.slice(0, 19).replace('T', ' ');
-    }
-    
-    // If it's already in the desired format (YYYY-MM-DD HH:MM:SS), return it
-    if (typeof timestamp === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(timestamp)) {
-        return timestamp;
-    }
-    
-    // For any other format, try to parse and format
     try {
-        return new Date(timestamp).toISOString().slice(0, 19).replace('T', ' ');
+        let date;
+        
+        // Handle null or undefined
+        if (!timestamp) {
+            return new Date().toISOString().slice(0, 19).replace('T', ' ');
+        }
+        
+        // Handle MongoDB Date objects (they have a getTime method)
+        if (timestamp instanceof Date || (typeof timestamp === 'object' && typeof timestamp.getTime === 'function')) {
+            date = timestamp;
+        }
+        else if (!isNaN(timestamp)) {
+            date = new Date(parseInt(timestamp));
+        }
+        else if (typeof timestamp === 'string' && timestamp.includes('T')) {
+            return timestamp.slice(0, 19).replace('T', ' ');
+        }
+        else if (typeof timestamp === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(timestamp)) {
+            return timestamp;
+        }
+        else {
+            date = new Date(timestamp);
+        }
+        
+        // Verify the date is valid
+        if (isNaN(date.getTime())) {
+            throw new Error('Invalid date');
+        }
+        
+        // Format to YYYY-MM-DD HH:MM:SS
+        return date.toISOString().slice(0, 19).replace('T', ' ');
     } catch (e) {
+        console.log(`Warning: Could not format timestamp (${e.message}), using current time instead`);
         return new Date().toISOString().slice(0, 19).replace('T', ' ');
     }
 }
@@ -492,20 +505,34 @@ app.post('/login', async (req, res) => {
         const { email } = req.body;
         
         if (!email || !email.includes('@')) {
+            console.log("LOGIN ERROR: Invalid email format");
             return res.status(400).json({ error: "Valid email is required" });
         }
         
-        console.log(`Login request for email: ${email}`);
+        console.log(`\n=============================================`);
+        console.log(`LOGIN REQUEST for email: ${email}`);
         
         // Check if user already exists
         let user = await User.findOne({ email });
         
         if (user) {
             // Update last login timestamp
+            const oldLoginTime = user.lastLogin;
             user.lastLogin = new Date();
             await user.save();
             
-            console.log(`Existing user logged in: ${user.userId}`);
+            // Format timestamps
+            const createdFormatted = formatTimestamp(user.createdAt);
+            const oldLoginFormatted = formatTimestamp(oldLoginTime);
+            const newLoginFormatted = formatTimestamp(user.lastLogin);
+            
+            console.log(`EXISTING USER FOUND in database:`);
+            console.log(`  User ID: ${user.userId}`);
+            console.log(`  Email: ${user.email}`);
+            console.log(`  Created: ${createdFormatted}`);
+            console.log(`  Last login updated: ${oldLoginFormatted} → ${newLoginFormatted}`);
+            console.log(`=============================================\n`);
+            
             return res.status(200).json({ 
                 message: "Login successful", 
                 user_id: user.userId 
@@ -513,23 +540,34 @@ app.post('/login', async (req, res) => {
         } else {
             // Create new user
             const userId = require('crypto').randomUUID();
+            const now = new Date();
+            
             user = new User({
                 email,
                 userId,
-                createdAt: new Date(),
-                lastLogin: new Date()
+                createdAt: now,
+                lastLogin: now
             });
             
             await user.save();
             
-            console.log(`New user created: ${userId}`);
+            // Format timestamp
+            const createdFormatted = formatTimestamp(now);
+            
+            console.log(`NEW USER CREATED in database:`);
+            console.log(`  User ID: ${userId}`);
+            console.log(`  Email: ${email}`);
+            console.log(`  Created: ${createdFormatted}`);
+            console.log(`=============================================\n`);
+            
             return res.status(201).json({ 
                 message: "User created", 
                 user_id: userId 
             });
         }
     } catch (err) {
-        console.error("Login error:", err);
+        console.error("LOGIN ERROR:", err);
+        console.log(`=============================================\n`);
         res.status(500).json({ error: "Failed to process login" });
     }
 });
@@ -591,35 +629,76 @@ async function cleanupIncompleteEntries() {
         console.error("Error cleaning up incomplete entries:", err);
     }
 }
-// Remove the location field from existing records
-async function removeLocationField() {
+
+// Add a test route to check database connection and list users
+app.get("/test-db", async (req, res) => {
     try {
-        console.log("Starting removal of location field from existing records...");
+        // Check database connection
+        const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
         
-        const busResult = await Bus.updateMany({}, { $unset: { location: "" } });
-        console.log(`Updated ${busResult.modifiedCount} bus entries`);
+        // Get count of users
+        const userCount = await User.countDocuments();
         
-        const vehicleResult = await Vehicle.updateMany({}, { $unset: { location: "" } });
-        console.log(`Updated ${vehicleResult.modifiedCount} vehicle entries`);
+        // Get all users (limit to 10 for safety)
+        const users = await User.find().limit(10);
         
-        const otherResult = await Other.updateMany({}, { $unset: { location: "" } });
-        console.log(`Updated ${otherResult.modifiedCount} other entries`);
+        res.json({
+            status: 'success',
+            dbConnection: dbStatus,
+            userCount: userCount,
+            users: users.map(user => ({
+                userId: user.userId,
+                email: user.email,
+                createdAt: user.createdAt,
+                lastLogin: user.lastLogin
+            }))
+        });
+    } catch (error) {
+        console.error("Database test error:", error);
+        res.status(500).json({
+            status: 'error',
+            message: error.message
+        });
+    }
+});
+
+// Function to verify and initialize the users collection
+async function verifyUsersCollection() {
+    try {
+        console.log("\n---------------------------------------------");
+        console.log("CHECKING USERS COLLECTION:");
         
-        // For bus images, we might still want the location for image context
-        //but you can uncomment this if you want to remove it there too
-        const busImageResult = await BusImage.updateMany({}, { $unset: { location: "" } });
-        console.log(`Updated ${busImageResult.modifiedCount} bus image entries`);
+        // Check if User model is working correctly
+        const userCount = await User.countDocuments();
+        console.log(`Found ${userCount} users in database`);
         
-        console.log("Location field removal complete.");
-    } catch (err) {
-        console.error("Error removing location field:", err);
+        if (userCount === 0) {
+            console.log("No users found in the database yet");
+        } else {
+            // List a few users to verify data structure
+            const users = await User.find();
+            console.log("Sample users:");
+            users.forEach(user => {
+                console.log(`  - ${user.email} (${user.userId}), Created: ${user.createdAt}`);
+            });
+        }
+        
+        // Check db connection status
+        const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+        console.log(`Database connection status: ${dbStatus}`);
+        
+        console.log("USERS COLLECTION CHECK COMPLETE");
+        console.log("---------------------------------------------\n");
+    } catch (error) {
+        console.error("Error verifying users collection:", error);
     }
 }
 
 // Clean existing data
 cleanupIncompleteEntries();
 
-removeLocationField();
+// Verify users collection
+verifyUsersCollection();
 
 // Start the Server
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
