@@ -26,7 +26,14 @@ const logSchema = new mongoose.Schema({
     timestamp: String,
     location: String,
     objectType: String,
-    direction: String
+    direction: String,
+    // GPS
+    gpsLocation: String,
+    gpsLatitude: Number,
+    gpsLongitude: Number,
+    // User
+    userId: String,
+    isPublic: { type: Boolean, default: false }
 });
 
 // Schema for bus images
@@ -37,15 +44,32 @@ const busImageSchema = new mongoose.Schema({
     location: String,
     objectType: { type: String, default: "bus" },
     deviceId: String,
-    eventType: { type: String, default: "unknown" }
+    eventType: { type: String, default: "unknown" },
+    // GPS
+    gpsLocation: String,
+    gpsLatitude: Number,
+    gpsLongitude: Number,
+    // User
+    userId: String,
+    isPublic: { type: Boolean, default: false }
 });
 
-// Create models for different collections
+// Schema for users
+const userSchema = new mongoose.Schema({
+    email: { type: String, required: true, unique: true },
+    userId: { type: String, required: true, unique: true },
+    createdAt: { type: Date, default: Date.now },
+    lastLogin: { type: Date, default: Date.now }
+});
+
+// Models for different collections
 const Bus = mongoose.model("Bus", logSchema);
 const Vehicle = mongoose.model("Vehicle", logSchema);
 const Other = mongoose.model("Other", logSchema);
 // Model for bus images
 const BusImage = mongoose.model("BusImage", busImageSchema);
+// Model for users
+const User = mongoose.model("User", userSchema);
 
 // mongoose
 const Log = mongoose.model("Log", logSchema);
@@ -132,8 +156,12 @@ app.post('/logs', async (req, res) => {
         const objectType = req.body.objectType || req.body.object_type || req.body.vehicle_type || "unknown";
         const direction = req.body.direction || "unknown";
         
+        if (objectType.toLowerCase() === "bus") {
+            return res.status(200).json({ message: "Bus logs are handled separately", status: "skipped" });
+        }
+
         // Create a unique key for this object to detect duplicates
-        const objectKey = `${sessionId}-${objectType}-${deviceId}-${timestamp.substring(0, 16)}`;
+        const objectKey = `${sessionId}-${objectType}-${deviceId}-${timestamp.substring(0, 13)}`;
         
         // Skip if we've recently processed this object
         if (isRecentlyProcessed(objectKey)) {
@@ -196,8 +224,25 @@ app.post('/tracking', async (req, res) => {
         const objectType = req.body.object_type || req.body.vehicle_type || "unknown";
         const direction = req.body.direction || "unknown";
         
+        // Extract GPS data
+        const gpsLocation = req.body.gps_location || "";
+        const gpsLatitude = parseFloat(req.body.gps_latitude) || null;
+        const gpsLongitude = parseFloat(req.body.gps_longitude) || null;
+        
+        // Extract user data
+        const userId = req.body.user_id || "";
+        const isPublic = req.body.is_public === true;
+        
+        // Skip if GPS data or user ID is missing
+        if (!gpsLocation || gpsLocation === "unknown,unknown" || !gpsLatitude || !gpsLongitude || !userId) {
+            return res.status(200).json({ 
+                message: "Missing GPS data or user ID, skipping",
+                status: "skipped" 
+            });
+        }
+        
         // Create a unique key for this object to detect duplicates
-        const objectKey = `${sessionId}-${objectType}-${deviceId}-${timestamp.substring(0, 16)}`;
+        const objectKey = `${sessionId}-${objectType}-${deviceId}-${timestamp.substring(0, 13)}`;
         
         // Skip if we've processed this object
         if (isRecentlyProcessed(objectKey)) {
@@ -206,6 +251,7 @@ app.post('/tracking', async (req, res) => {
                 status: "skipped" 
             });
         }
+        
         console.log(" ");
         console.log("-----------------------------");
         console.log("RECEIVED TRACKING DATA:");
@@ -215,6 +261,9 @@ app.post('/tracking', async (req, res) => {
         console.log("  Location: " + location);
         console.log("  Object Type: " + objectType);
         console.log("  Direction: " + direction);
+        console.log("  GPS: " + gpsLocation);
+        console.log("  User ID: " + userId);
+        console.log("  Public: " + isPublic);
         console.log("-----------------------------");
 
         // Choose collection based on object type
@@ -227,13 +276,20 @@ app.post('/tracking', async (req, res) => {
             Model = Other;
         }
 
-        // Save data(log) to one of the collections in the database(MongoDB)
+        // Save data with new fields to the database
         const newLog = new Model({
             sessionId: sessionId,
             timestamp: timestamp,
             location: location,
             objectType: objectType,
-            direction: direction
+            direction: direction,
+            // Add GPS data
+            gpsLocation: gpsLocation,
+            gpsLatitude: gpsLatitude,
+            gpsLongitude: gpsLongitude,
+            // Add user data
+            userId: userId,
+            isPublic: isPublic
         });
 
         await newLog.save();
@@ -318,11 +374,29 @@ app.post('/bus-image', async (req, res) => {
             req.body.position_x || req.body.exit_position_x, 
             req.body.position_y || req.body.exit_position_y
         );
+        
+        // Extract GPS data
+        const gpsLocation = req.body.gps_location || "";
+        const gpsLatitude = parseFloat(req.body.gps_latitude) || null;
+        const gpsLongitude = parseFloat(req.body.gps_longitude) || null;
+        
+        // Extract user data
+        const userId = req.body.user_id || "";
+        const isPublic = req.body.is_public === true;
+        
         // Add support for event type
         const eventType = req.body.event_type || "unknown"; // Can be "entry", "exit", or "continuous"
         
+        // Skip if GPS data or user ID is missing
+        if (!gpsLocation || gpsLocation === "unknown,unknown" || !gpsLatitude || !gpsLongitude || !userId) {
+            return res.status(200).json({ 
+                message: "Missing GPS data or user ID, skipping",
+                status: "skipped" 
+            });
+        }
+        
         // Create a unique key for this bus image to detect duplicates
-        const imageKey = `busimg-${sessionId}-${deviceId}-${timestamp.substring(0, 16)}`;
+        const imageKey = `busimg-${sessionId}-${deviceId}-${timestamp.substring(0, 13)}`;
         
         console.log(" ");
         console.log("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
@@ -332,6 +406,9 @@ app.post('/bus-image', async (req, res) => {
         console.log("  Timestamp: " + timestamp);
         console.log("  Location: " + location);
         console.log("  Event Type: " + eventType);
+        console.log("  GPS: " + gpsLocation);
+        console.log("  User ID: " + userId);
+        console.log("  Public: " + isPublic);
         console.log("  Image data length: " + (image_data ? image_data.length : 0));
         console.log("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
         
@@ -354,7 +431,7 @@ app.post('/bus-image', async (req, res) => {
             });
         }
         
-        // Save image data to the bus_images collection
+        // Save image data to the bus_images collection with new fields
         const newBusImage = new BusImage({
             sessionId: sessionId,
             timestamp: timestamp,
@@ -362,24 +439,37 @@ app.post('/bus-image', async (req, res) => {
             location: location,
             objectType: "bus",
             deviceId: deviceId,
-            eventType: eventType // Add event type to the document
+            eventType: eventType,
+            // Add GPS data
+            gpsLocation: gpsLocation,
+            gpsLatitude: gpsLatitude,
+            gpsLongitude: gpsLongitude,
+            // Add user data
+            userId: userId,
+            isPublic: isPublic
         });
         
         await newBusImage.save();
         
-        // IMPORTANT: Also create a tracking entry for the bus in the Bus collection
-        const busTrackingKey = `${sessionId}-bus-${deviceId}-${timestamp.substring(0, 16)}`;
+        // Also create a tracking entry for the bus in the Bus collection
+        const busTrackingKey = `${sessionId}-bus-${deviceId}-${timestamp.substring(0, 13)}`;
         
         // Skip if we've recently processed this object to avoid duplicates
         if (!isRecentlyProcessed(busTrackingKey)) {
-            // Save a tracking entry for this bus to the Bus collection
+            // Save a tracking entry for this bus to the Bus collection with new fields
             const newBusTracking = new Bus({
                 sessionId: sessionId,
                 timestamp: timestamp,
                 location: location,
                 objectType: "bus",
-                direction: "unknown",
-                eventType: eventType // Add event type to the tracking entry
+                direction: eventType === "exit" ? "outbound" : "inbound", // Set a direction based on event type
+                // Add GPS data
+                gpsLocation: gpsLocation,
+                gpsLatitude: gpsLatitude,
+                gpsLongitude: gpsLongitude,
+                // Add user data
+                userId: userId,
+                isPublic: isPublic
             });
             
             await newBusTracking.save();
@@ -401,6 +491,115 @@ app.post('/bus-image', async (req, res) => {
         res.status(500).json({ error: "Failed to store bus image" });
     }
 });
+
+// POST for login
+app.post('/login', async (req, res) => {
+    try {
+        const { email } = req.body;
+        
+        if (!email || !email.includes('@')) {
+            return res.status(400).json({ error: "Valid email is required" });
+        }
+        
+        console.log(`Login request for email: ${email}`);
+        
+        // Check if user already exists
+        let user = await User.findOne({ email });
+        
+        if (user) {
+            // Update last login timestamp
+            user.lastLogin = new Date();
+            await user.save();
+            
+            console.log(`Existing user logged in: ${user.userId}`);
+            return res.status(200).json({ 
+                message: "Login successful", 
+                user_id: user.userId 
+            });
+        } else {
+            // Create new user
+            const userId = require('crypto').randomUUID();
+            user = new User({
+                email,
+                userId,
+                createdAt: new Date(),
+                lastLogin: new Date()
+            });
+            
+            await user.save();
+            
+            console.log(`New user created: ${userId}`);
+            return res.status(201).json({ 
+                message: "User created", 
+                user_id: userId 
+            });
+        }
+    } catch (err) {
+        console.error("Login error:", err);
+        res.status(500).json({ error: "Failed to process login" });
+    }
+});
+
+async function cleanupIncompleteEntries() {
+    try {
+        console.log("Starting cleanup of incomplete entries...");
+        
+        // Find and delete bus entries with missing GPS or user data
+        const busResult = await Bus.deleteMany({ 
+            $or: [
+                { gpsLocation: { $in: ["", "unknown,unknown", null] } },
+                { gpsLatitude: null },
+                { gpsLongitude: null },
+                { userId: "" }
+            ]
+        });
+        
+        console.log(`Deleted ${busResult.deletedCount} incomplete bus entries`);
+        
+        // Find and delete vehicle entries with missing GPS or user data
+        const vehicleResult = await Vehicle.deleteMany({ 
+            $or: [
+                { gpsLocation: { $in: ["", "unknown,unknown", null] } },
+                { gpsLatitude: null },
+                { gpsLongitude: null },
+                { userId: "" }
+            ]
+        });
+        
+        console.log(`Deleted ${vehicleResult.deletedCount} incomplete vehicle entries`);
+        
+        // Find and delete other entries with missing GPS or user data
+        const otherResult = await Other.deleteMany({ 
+            $or: [
+                { gpsLocation: { $in: ["", "unknown,unknown", null] } },
+                { gpsLatitude: null },
+                { gpsLongitude: null },
+                { userId: "" }
+            ]
+        });
+        
+        console.log(`Deleted ${otherResult.deletedCount} incomplete other entries`);
+        
+        // Find and delete bus image entries with missing GPS or user data
+        const busImageResult = await BusImage.deleteMany({ 
+            $or: [
+                { gpsLocation: { $in: ["", "unknown,unknown", null] } },
+                { gpsLatitude: null },
+                { gpsLongitude: null },
+                { userId: "" }
+            ]
+        });
+        
+        console.log(`Deleted ${busImageResult.deletedCount} incomplete bus image entries`);
+        
+        console.log("Cleanup complete.");
+    } catch (err) {
+        console.error("Error cleaning up incomplete entries:", err);
+    }
+}
+
+// Clean existing data
+cleanupIncompleteEntries();
 
 // Start the Server
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
