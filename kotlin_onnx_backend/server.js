@@ -572,6 +572,552 @@ app.post('/login', async (req, res) => {
     }
 });
 
+
+// FOR WEBSITE
+// Web Authentication, return JWT token
+app.post('/web/login', async (req, res) => {
+    try {
+        const { email } = req.body;
+        
+        if (!email || !email.includes('@')) {
+            return res.status(400).json({ error: "Valid email is required" });
+        }
+        
+        console.log(`\n=============================================`);
+        console.log(`WEB LOGIN REQUEST for email: ${email}`);
+        
+        // Check if user already exists
+        let user = await User.findOne({ email });
+        
+        if (user) {
+            // Update last login
+            user.lastLogin = new Date();
+            await user.save();
+            
+            console.log(`EXISTING USER: ${user.userId}`);
+            
+            // Get token for web authentication
+            const token = generateJwtToken(user.userId, email);
+            
+            return res.status(200).json({ 
+                message: "Login successful", 
+                user_id: user.userId,
+                token: token
+            });
+        } else {
+            // Create new user
+            const userId = require('crypto').randomUUID();
+            
+            user = new User({
+                email,
+                userId,
+                createdAt: new Date(),
+                lastLogin: new Date()
+            });
+            
+            await user.save();
+            
+            console.log(`NEW WEB USER: ${userId}`);
+            
+            // Get token for web authentication
+            const token = generateJwtToken(userId, email);
+            
+            return res.status(201).json({ 
+                message: "User created", 
+                user_id: userId,
+                token: token
+            });
+        }
+    } catch (err) {
+        console.error("WEB LOGIN ERROR:", err);
+        res.status(500).json({ error: "Failed to process login" });
+    }
+});
+
+// Get token for web authentication
+function generateJwtToken(userId, email) {
+    const jwt = require('jsonwebtoken');
+    const secretKey = process.env.JWT_SECRET || 'your-secret-key';
+    
+    // Token that expires after 24 hour
+    return jwt.sign(
+        { userId, email },
+        secretKey,
+        { expiresIn: '24h' }
+    );
+}
+
+// Authenticate token
+function authenticateToken(req, res, next) {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (!token) return res.status(401).json({ error: "Authentication required" });
+    
+    const jwt = require('jsonwebtoken');
+    const secretKey = process.env.JWT_SECRET || 'your-secret-key';
+    
+    jwt.verify(token, secretKey, (err, user) => {
+        if (err) return res.status(403).json({ error: "Invalid or expired token" });
+        
+        req.user = user; // Attach user to request
+        next();
+    });
+}
+
+// Get sessions by userId or public video
+app.get('/api/sessions', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.userId;
+        const filter = req.query.filter || 'private';
+        
+        let query = {};
+        
+        if (filter === 'private') {
+            query = { userId: userId };
+        } else if (filter === 'public') {
+            query = { isPublic: true };
+        } else if (filter === 'all') {
+            // Show all sessions
+            query = { $or: [{ userId: userId }, { isPublic: true }] };
+        }
+        
+        // Find sessionIds meeting the criteria
+        const busSessions = await Bus.distinct('sessionId', query);
+        const vehicleSessions = await Vehicle.distinct('sessionId', query);
+        const otherSessions = await Other.distinct('sessionId', query);
+        
+        // Combine all unique sessionIds
+        const allSessionIds = [...new Set([...busSessions, ...vehicleSessions, ...otherSessions])];
+        
+        // Get session details
+        const sessionDetails = await Promise.all(allSessionIds.map(async (sessionId) => {
+            // Set oldest timestamp as session start time
+            const oldestBus = await Bus.findOne({ sessionId }).sort({ timestamp: 1 }).limit(1);
+            const oldestVehicle = await Vehicle.findOne({ sessionId }).sort({ timestamp: 1 }).limit(1);
+            const oldestOther = await Other.findOne({ sessionId }).sort({ timestamp: 1 }).limit(1);
+            
+            // Set newest timestamp as session end time
+            const newestBus = await Bus.findOne({ sessionId }).sort({ timestamp: -1 }).limit(1);
+            const newestVehicle = await Vehicle.findOne({ sessionId }).sort({ timestamp: -1 }).limit(1);
+            const newestOther = await Other.findOne({ sessionId }).sort({ timestamp: -1 }).limit(1);
+            
+            // Check all timestamps to find start and end
+            const timestamps = [
+                oldestBus?.timestamp, oldestVehicle?.timestamp, oldestOther?.timestamp,
+                newestBus?.timestamp, newestVehicle?.timestamp, newestOther?.timestamp
+            ].filter(t => t);
+            
+            // Find earliest and latest timestamps
+            timestamps.sort();
+            const startTime = timestamps[0];
+            const endTime = timestamps[timestamps.length - 1];
+            
+            // Get the user who created this session
+            const sessionUser = await User.findOne({ 
+                userId: oldestBus?.userId || oldestVehicle?.userId || oldestOther?.userId 
+            });
+            
+            // Count objects by type
+            const busCount = await Bus.countDocuments({ sessionId });
+            const carCount = await Vehicle.countDocuments({ sessionId, objectType: 'car' });
+            const truckCount = await Vehicle.countDocuments({ sessionId, objectType: 'truck' });
+            const motorcycleCount = await Vehicle.countDocuments({ sessionId, objectType: 'motorcycle' });
+            const otherCount = await Other.countDocuments({ sessionId });
+            
+            // Check if session has images
+            const hasImages = await BusImage.exists({ sessionId });
+            
+            // Check if session is public
+            const isPublic = (oldestBus?.isPublic || oldestVehicle?.isPublic || oldestOther?.isPublic) || false;
+            
+            // Check if session is user's session
+            const isOwner = (oldestBus?.userId === userId || oldestVehicle?.userId === userId || oldestOther?.userId === userId);
+            
+            return {
+                sessionId,
+                startTime,
+                endTime,
+                duration: startTime && endTime ? getTimeDiff(startTime, endTime) : null,
+                user: sessionUser ? {
+                    userId: sessionUser.userId,
+                    email: sessionUser.email
+                } : null,
+                objectCounts: {
+                    bus: busCount,
+                    car: carCount,
+                    truck: truckCount,
+                    motorcycle: motorcycleCount,
+                    other: otherCount,
+                    total: busCount + carCount + truckCount + motorcycleCount + otherCount
+                },
+                hasImages,
+                isPublic,
+                isOwner
+            };
+        }));
+        
+        res.json(sessionDetails);
+        
+    } catch (err) {
+        console.error("Error fetching sessions:", err);
+        res.status(500).json({ error: "Failed to fetch sessions" });
+    }
+});
+
+// Get time difference
+function getTimeDiff(start, end) {
+    const startDate = new Date(start.replace(' ', 'T'));
+    const endDate = new Date(end.replace(' ', 'T'));
+    const diffMs = Math.abs(endDate - startDate);
+    
+    const diffMins = Math.floor(diffMs / 60000);
+    const hours = Math.floor(diffMins / 60);
+    const mins = diffMins % 60;
+    
+    return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+}
+
+// Get session details
+app.get('/api/sessions/:sessionId', authenticateToken, async (req, res) => {
+    try {
+        const { sessionId } = req.params;
+        const userId = req.user.userId;
+        
+        // Check if session exists and user has access
+        const buses = await Bus.find({ sessionId });
+        const vehicles = await Vehicle.find({ sessionId });
+        const others = await Other.find({ sessionId });
+        
+        if (buses.length === 0 && vehicles.length === 0 && others.length === 0) {
+            return res.status(404).json({ error: "Session not found" });
+        }
+        
+        // Check access
+        const isOwner = buses.some(b => b.userId === userId) || 
+                        vehicles.some(v => v.userId === userId) || 
+                        others.some(o => o.userId === userId);
+                        
+        const isPublic = buses.some(b => b.isPublic) || 
+                         vehicles.some(v => v.isPublic) || 
+                         others.some(o => o.isPublic);
+        
+        if (!isOwner && !isPublic) {
+            return res.status(403).json({ error: "You don't have permission to access this session" });
+        }
+        
+        // Get session data
+        const busData = buses.map(formatObjectData);
+        const vehicleData = vehicles.map(formatObjectData);
+        const otherData = others.map(formatObjectData);
+        
+        // Get image data if available
+        const images = await BusImage.find({ sessionId }).select('-imageData');
+        const imageData = images.map(img => ({
+            id: img._id,
+            timestamp: img.timestamp,
+            objectType: img.objectType,
+            eventType: img.eventType,
+            gpsLocation: img.gpsLocation,
+            gpsLatitude: img.gpsLatitude,
+            gpsLongitude: img.gpsLongitude,
+            // Don't include image data in the list to keep it smaller
+            hasImage: true
+        }));
+        
+        res.json({
+            sessionId,
+            objects: {
+                buses: busData,
+                vehicles: vehicleData,
+                others: otherData
+            },
+            images: imageData,
+            access: {
+                isOwner,
+                isPublic
+            }
+        });
+        
+    } catch (err) {
+        console.error("Error fetching session details:", err);
+        res.status(500).json({ error: "Failed to fetch session details" });
+    }
+});
+
+// Format object data
+function formatObjectData(obj) {
+    return {
+        id: obj._id,
+        timestamp: obj.timestamp,
+        objectType: obj.objectType,
+        direction: obj.direction,
+        gpsLocation: obj.gpsLocation,
+        gpsLatitude: obj.gpsLatitude,
+        gpsLongitude: obj.gpsLongitude
+    };
+}
+
+// Get image by ID
+app.get('/api/images/:imageId', authenticateToken, async (req, res) => {
+    try {
+        const { imageId } = req.params;
+        const userId = req.user.userId;
+        
+        const image = await BusImage.findById(imageId);
+        
+        if (!image) {
+            return res.status(404).json({ error: "Image not found" });
+        }
+        
+        // Check access permissions
+        if (image.userId !== userId && !image.isPublic) {
+            return res.status(403).json({ error: "You don't have permission to access this image" });
+        }
+        
+        // Return all image data
+        res.json({
+            id: image._id,
+            sessionId: image.sessionId,
+            timestamp: image.timestamp,
+            objectType: image.objectType,
+            deviceId: image.deviceId,
+            eventType: image.eventType,
+            gpsLocation: image.gpsLocation,
+            gpsLatitude: image.gpsLatitude,
+            gpsLongitude: image.gpsLongitude,
+            imageData: image.imageData
+        });
+        
+    } catch (err) {
+        console.error("Error fetching image:", err);
+        res.status(500).json({ error: "Failed to fetch image" });
+    }
+});
+
+// Get traffic data for visualizations
+app.get('/api/visualizations/traffic-volume', authenticateToken, async (req, res) => {
+    try {
+        const { sessionId, timeUnit = 'hour' } = req.query;
+        const userId = req.user.userId;
+        
+        // Check session access
+        const buses = await Bus.find({ sessionId });
+        const vehicles = await Vehicle.find({ sessionId });
+        
+        const isOwner = buses.some(b => b.userId === userId) || 
+                        vehicles.some(v => v.userId === userId);
+                        
+        const isPublic = buses.some(b => b.isPublic) || 
+                         vehicles.some(v => v.isPublic);
+        
+        if (!isOwner && !isPublic) {
+            return res.status(403).json({ error: "You don't have permission to access this session" });
+        }
+        
+        // Prepare traffic data
+        const allObjects = [...buses, ...vehicles];
+        
+        // Group by time unit
+        const volumeData = allObjects.reduce((acc, obj) => {
+            const date = new Date(obj.timestamp.replace(' ', 'T'));
+            let timeKey;
+            
+            if (timeUnit === 'minute') {
+                // Format: HH:MM
+                timeKey = `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+            } else if (timeUnit === 'hour') {
+                // Format: HH:00
+                timeKey = `${date.getHours().toString().padStart(2, '0')}:00`;
+            } else if (timeUnit === 'day') {
+                // Format: MM-DD
+                timeKey = `${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')}`;
+            }
+            
+            if (!acc[timeKey]) {
+                acc[timeKey] = {
+                    timeKey,
+                    total: 0,
+                    bus: 0,
+                    car: 0,
+                    truck: 0,
+                    motorcycle: 0,
+                    other: 0
+                };
+            }
+            
+            acc[timeKey].total += 1;
+            
+            const objType = obj.objectType.toLowerCase();
+            if (objType === 'bus') acc[timeKey].bus += 1;
+            else if (objType === 'car') acc[timeKey].car += 1;
+            else if (objType === 'truck') acc[timeKey].truck += 1;
+            else if (objType === 'motorcycle') acc[timeKey].motorcycle += 1;
+            else acc[timeKey].other += 1;
+            
+            return acc;
+        }, {});
+        
+        // Sort by time and turn to array
+        const result = Object.values(volumeData).sort((a, b) => a.timeKey.localeCompare(b.timeKey));
+        
+        res.json(result);
+        
+    } catch (err) {
+        console.error("Error fetching traffic volume data:", err);
+        res.status(500).json({ error: "Failed to fetch traffic volume data" });
+    }
+});
+
+// Get vehicle type distribution
+app.get('/api/visualizations/vehicle-distribution', authenticateToken, async (req, res) => {
+    try {
+        const { sessionId } = req.query;
+        const userId = req.user.userId;
+        
+        // Check session access
+        const buses = await Bus.find({ sessionId });
+        const vehicles = await Vehicle.find({ sessionId });
+        
+        const isOwner = buses.some(b => b.userId === userId) || 
+                        vehicles.some(v => v.userId === userId);
+                        
+        const isPublic = buses.some(b => b.isPublic) || 
+                         vehicles.some(v => v.isPublic);
+        
+        if (!isOwner && !isPublic) {
+            return res.status(403).json({ error: "You don't have permission to access this session" });
+        }
+        
+        // Count vehicles of same type
+        const busCount = buses.length;
+        const carCount = vehicles.filter(v => v.objectType.toLowerCase() === 'car').length;
+        const truckCount = vehicles.filter(v => v.objectType.toLowerCase() === 'truck').length;
+        const motorcycleCount = vehicles.filter(v => v.objectType.toLowerCase() === 'motorcycle').length;
+        const otherCount = vehicles.filter(v => 
+            !['car', 'truck', 'motorcycle'].includes(v.objectType.toLowerCase())
+        ).length;
+        
+        res.json([
+            { type: 'Bus', count: busCount },
+            { type: 'Car', count: carCount },
+            { type: 'Truck', count: truckCount },
+            { type: 'Motorcycle', count: motorcycleCount },
+            { type: 'Other', count: otherCount }
+        ]);
+        
+    } catch (err) {
+        console.error("Error fetching vehicle distribution data:", err);
+        res.status(500).json({ error: "Failed to fetch vehicle distribution data" });
+    }
+});
+
+// Get direction
+app.get('/api/visualizations/movement-patterns', authenticateToken, async (req, res) => {
+    try {
+        const { sessionId } = req.query;
+        const userId = req.user.userId;
+        
+        // Check session access
+        const buses = await Bus.find({ sessionId });
+        const vehicles = await Vehicle.find({ sessionId });
+        
+        const isOwner = buses.some(b => b.userId === userId) || 
+                        vehicles.some(v => v.userId === userId);
+                        
+        const isPublic = buses.some(b => b.isPublic) || 
+                         vehicles.some(v => v.isPublic);
+        
+        if (!isOwner && !isPublic) {
+            return res.status(403).json({ error: "You don't have permission to access this session" });
+        }
+        
+        // Combine all objects
+        const allObjects = [...buses, ...vehicles];
+        
+        // Group by direction
+        const directionData = allObjects.reduce((acc, obj) => {
+            const direction = obj.direction || 'Unknown';
+            
+            if (!acc[direction]) {
+                acc[direction] = {
+                    direction,
+                    count: 0,
+                    vehicles: {
+                        bus: 0,
+                        car: 0,
+                        truck: 0,
+                        motorcycle: 0,
+                        other: 0
+                    }
+                };
+            }
+            
+            acc[direction].count += 1;
+            
+            // Count by vehicle type
+            const objType = obj.objectType.toLowerCase();
+            if (objType === 'bus') acc[direction].vehicles.bus += 1;
+            else if (objType === 'car') acc[direction].vehicles.car += 1;
+            else if (objType === 'truck') acc[direction].vehicles.truck += 1;
+            else if (objType === 'motorcycle') acc[direction].vehicles.motorcycle += 1;
+            else acc[direction].vehicles.other += 1;
+            
+            return acc;
+        }, {});
+        
+        // Convert to array and sort by count
+        const result = Object.values(directionData).sort((a, b) => b.count - a.count);
+        
+        res.json(result);
+        
+    } catch (err) {
+        console.error("Error fetching movement pattern data:", err);
+        res.status(500).json({ error: "Failed to fetch movement pattern data" });
+    }
+});
+
+// Get GPS data for heat maps
+app.get('/api/visualizations/gps-heatmap', authenticateToken, async (req, res) => {
+    try {
+        const { sessionId } = req.query;
+        const userId = req.user.userId;
+        
+        // Check session access
+        const buses = await Bus.find({ sessionId }).select('gpsLatitude gpsLongitude objectType');
+        const vehicles = await Vehicle.find({ sessionId }).select('gpsLatitude gpsLongitude objectType');
+        
+        const isOwner = buses.some(b => b.userId === userId) || 
+                        vehicles.some(v => v.userId === userId);
+                        
+        const isPublic = buses.some(b => b.isPublic) || 
+                         vehicles.some(v => v.isPublic);
+        
+        if (!isOwner && !isPublic) {
+            return res.status(403).json({ error: "You don't have permission to access this session" });
+        }
+        
+        // Combine GPS data points
+        const allGpsData = [...buses, ...vehicles]
+            .filter(obj => obj.gpsLatitude && obj.gpsLongitude) // Remove points with missing GPS
+            .map(obj => ({
+                lat: obj.gpsLatitude,
+                lng: obj.gpsLongitude,
+                type: obj.objectType?.toLowerCase() || 'unknown'
+            }));
+        
+        res.json(allGpsData);
+        
+    } catch (err) {
+        console.error("Error fetching GPS data:", err);
+        res.status(500).json({ error: "Failed to fetch GPS data" });
+    }
+}); 
+
+
+
+
+// Tidying up
 async function cleanupIncompleteEntries() {
     try {
         console.log("Starting cleanup of incomplete entries...");
