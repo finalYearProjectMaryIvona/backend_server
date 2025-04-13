@@ -670,71 +670,68 @@ app.get('/api/sessions', authenticateToken, async (req, res) => {
     try {
         const userId = req.user.userId;
         const filter = req.query.filter || 'private';
-        
+
         let query = {};
-        
-        if (filter === 'private') {
+
+        if (filter === 'mine' || filter === 'private') {
             query = { userId: userId };
         } else if (filter === 'public') {
             query = { isPublic: true };
         } else if (filter === 'all') {
-            // Show all sessions
             query = { $or: [{ userId: userId }, { isPublic: true }] };
         }
-        
+
         // Find sessionIds meeting the criteria
         const busSessions = await Bus.distinct('sessionId', query);
         const vehicleSessions = await Vehicle.distinct('sessionId', query);
         const otherSessions = await Other.distinct('sessionId', query);
-        
-        // Combine all unique sessionIds
+
         const allSessionIds = [...new Set([...busSessions, ...vehicleSessions, ...otherSessions])];
-        
-        // Get session details
-        const sessionDetails = await Promise.all(allSessionIds.map(async (sessionId) => {
-            // Set oldest timestamp as session start time
-            const oldestBus = await Bus.findOne({ sessionId }).sort({ timestamp: 1 }).limit(1);
-            const oldestVehicle = await Vehicle.findOne({ sessionId }).sort({ timestamp: 1 }).limit(1);
-            const oldestOther = await Other.findOne({ sessionId }).sort({ timestamp: 1 }).limit(1);
-            
-            // Set newest timestamp as session end time
-            const newestBus = await Bus.findOne({ sessionId }).sort({ timestamp: -1 }).limit(1);
-            const newestVehicle = await Vehicle.findOne({ sessionId }).sort({ timestamp: -1 }).limit(1);
-            const newestOther = await Other.findOne({ sessionId }).sort({ timestamp: -1 }).limit(1);
-            
-            // Check all timestamps to find start and end
+
+        const sessionDetails = [];
+
+        for (const sessionId of allSessionIds) {
+            // Check ownership and public status
+            const oldestBus = await Bus.findOne({ sessionId }).sort({ timestamp: 1 });
+            const oldestVehicle = await Vehicle.findOne({ sessionId }).sort({ timestamp: 1 });
+            const oldestOther = await Other.findOne({ sessionId }).sort({ timestamp: 1 });
+
+            const isPublic = (oldestBus?.isPublic || oldestVehicle?.isPublic || oldestOther?.isPublic) || false;
+            const isOwner = (oldestBus?.userId === userId || oldestVehicle?.userId === userId || oldestOther?.userId === userId);
+
+            // ENFORCE filter logic
+            if ((filter === 'mine' && !isOwner) || (filter === 'public' && !isPublic)) {
+                continue;
+            }
+
             const timestamps = [
                 oldestBus?.timestamp, oldestVehicle?.timestamp, oldestOther?.timestamp,
-                newestBus?.timestamp, newestVehicle?.timestamp, newestOther?.timestamp
-            ].filter(t => t);
-            
-            // Find earliest and latest timestamps
-            timestamps.sort();
+                (await Bus.findOne({ sessionId }).sort({ timestamp: -1 }))?.timestamp,
+                (await Vehicle.findOne({ sessionId }).sort({ timestamp: -1 }))?.timestamp,
+                (await Other.findOne({ sessionId }).sort({ timestamp: -1 }))?.timestamp
+            ].filter(Boolean).sort();
+
             const startTime = timestamps[0];
             const endTime = timestamps[timestamps.length - 1];
-            
-            // Get the user who created this session
-            const sessionUser = await User.findOne({ 
-                userId: oldestBus?.userId || oldestVehicle?.userId || oldestOther?.userId 
+
+            const sessionUser = await User.findOne({
+                userId: oldestBus?.userId || oldestVehicle?.userId || oldestOther?.userId
             });
-            
-            // Count objects by type
+
             const busCount = await Bus.countDocuments({ sessionId });
             const carCount = await Vehicle.countDocuments({ sessionId, objectType: 'car' });
             const truckCount = await Vehicle.countDocuments({ sessionId, objectType: 'truck' });
             const motorcycleCount = await Vehicle.countDocuments({ sessionId, objectType: 'motorcycle' });
             const otherCount = await Other.countDocuments({ sessionId });
-            
-            // Check if session has images
+
             const hasImages = await BusImage.exists({ sessionId });
-            
-            // Check if session is public
-            const isPublic = (oldestBus?.isPublic || oldestVehicle?.isPublic || oldestOther?.isPublic) || false;
-            
-            // Check if session is user's session
-            const isOwner = (oldestBus?.userId === userId || oldestVehicle?.userId === userId || oldestOther?.userId === userId);
-            
-            return {
+
+            //  Get a valid GPS entry (for mapping)
+            const gpsEntry = oldestBus || oldestVehicle || oldestOther;
+            const gpsLatitude = gpsEntry?.gpsLatitude || null;
+            const gpsLongitude = gpsEntry?.gpsLongitude || null;
+
+            sessionDetails.push({
                 sessionId,
                 startTime,
                 endTime,
@@ -753,17 +750,19 @@ app.get('/api/sessions', authenticateToken, async (req, res) => {
                 },
                 hasImages,
                 isPublic,
-                isOwner
-            };
-        }));
-        
+                isOwner,
+                gpsLatitude,
+                gpsLongitude
+            });
+        }
+
         res.json(sessionDetails);
-        
     } catch (err) {
         console.error("Error fetching sessions:", err);
         res.status(500).json({ error: "Failed to fetch sessions" });
     }
 });
+
 
 // Get time difference
 function getTimeDiff(start, end) {
@@ -1114,10 +1113,6 @@ app.get('/api/visualizations/gps-heatmap', authenticateToken, async (req, res) =
     }
 }); 
 
-
-
-
-// Tidying up
 async function cleanupIncompleteEntries() {
     try {
         console.log("Starting cleanup of incomplete entries...");
